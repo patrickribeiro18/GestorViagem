@@ -67,7 +67,7 @@ def logout_user():
 def get_google_auth_data():
     """Gera a URL de auth e o code_verifier (PKCE)."""
     try:
-        redirect_url = "https://gestorviagem.streamlit.app/"
+        redirect_url = "https://gestorviagem.streamlit.app"
         data = supabase.auth.sign_in_with_oauth({
             "provider": "google",
             "options": {
