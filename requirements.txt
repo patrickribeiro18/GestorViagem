@@ -1,0 +1,8 @@
+streamlit
+openrouteservice
+folium
+streamlit-folium
+pandas
+supabase
+googlemaps
+extra-streamlit-components
