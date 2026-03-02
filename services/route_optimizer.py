@@ -42,6 +42,7 @@ def optimize_stops(
     avoid_night: bool,
     extend_sunset: bool,
     ors_client,
+    fixed_stops: list = None, # Lista de [{coords, type, name}]
     progress_callback=None,
 ) -> tuple[list, float]:
     """
@@ -100,67 +101,90 @@ def optimize_stops(
         reason = ""
         stop_duration_h = 0
 
-        effective_sleep_limit = limit_sleep
-        if extend_sunset and (not is_night_now) and (d_sleep < hard_limit_sleep):
-            effective_sleep_limit = hard_limit_sleep
+        # --- NOVA LÓGICA: PARADAS FIXAS MANUAIS ---
+        # Se houver uma parada fixa manual próxima a este KM, usamos ela e resetamos contadores
+        if fixed_stops:
+            for fs in fixed_stops:
+                fs_lat, fs_lon = fs["coords"][1], fs["coords"][0]
+                dist_to_fs = utils.calculate_distance(lat, lon, fs_lat, fs_lon)
+                if dist_to_fs < 15: # Se estamos a menos de 15km da parada fixa
+                    cat = fs.get("type", "coffee")
+                    reason = f"📍 {fs.get('name', 'Parada Selecionada')}"
+                    stop_duration_h = fs.get("duration_h", dur_rest/60)
+                    # Forçamos a localização exata da parada fixa
+                    lat, lon = fs_lat, fs_lon
+                    # Removemos para não repetir a mesma parada fixa
+                    fixed_stops.remove(fs)
+                    # Reset de contadores
+                    d_rest = 0
+                    if cat in ["fuel", "combo"]: d_fuel = 0
+                    if cat in ["sleep", "night_stop", "combo"]: 
+                        d_sleep = 0
+                        day_count += 1
+                    break
 
-        # --- REGRAS DE COMBO E ANTECIPAÇÃO ---
-        
-        # 1. Pernoite Forçado (Anoiteceu ou bateu limite de horas)
-        forced_night = (avoid_night and is_night_now) or (d_sleep >= effective_sleep_limit)
-        
-        # 2. Se falta pouco para pernoite/noite, checa se precisa abastecer/descansar agora
-        near_night = (avoid_night and minutes_to_night < 90) or (effective_sleep_limit - d_sleep < lookahead_km)
-        
-        if forced_night:
-            cat = "night_stop"
-            reason = "🛑 Pernoite"
-            if d_fuel > (range_fuel * 0.7):
-                cat = "combo"
-                reason = "🛌 Pernoite + Abastecer"
-                d_fuel = 0
+        if not cat:
+            effective_sleep_limit = limit_sleep
+            if extend_sunset and (not is_night_now) and (d_sleep < hard_limit_sleep):
+                effective_sleep_limit = hard_limit_sleep
+
+            # --- REGRAS DE COMBO E ANTECIPAÇÃO ---
             
-            # Reset de cansaço
-            stop_duration_h = dur_sleep
-            d_sleep = 0
-            d_rest = 0
-            day_count += 1
-
-        elif d_fuel >= range_fuel:
-            # Se for abastecer e estiver perto da noite, faz combo pernoite
-            if near_night:
-                cat = "combo"
-                reason = "⛽ Abastecer + Pernoite"
-                stop_duration_h = dur_sleep
-                d_sleep = 0
-                day_count += 1
-            else:
-                cat = "fuel"
-                reason = "Fuel Stop"
-                stop_duration_h = dur_fuel / 60
-            d_fuel = 0
-            d_rest = 0
-
-        elif d_rest >= rest_interval_km:
-            # Se for descansar e estiver perto de algo maior (noite ou combustível), decide se antecipa
-            km_rem_fuel = range_fuel - d_fuel
-            if near_night:
-                # Antecipa pernoite em vez de só café
+            # 1. Pernoite Forçado (Anoiteceu ou bateu limite de horas)
+            forced_night = (avoid_night and is_night_now) or (d_sleep >= effective_sleep_limit)
+            
+            # 2. Se falta pouco para pernoite/noite, checa se precisa abastecer/descansar agora
+            near_night = (avoid_night and minutes_to_night < 90) or (effective_sleep_limit - d_sleep < lookahead_km)
+            
+            if forced_night:
                 cat = "night_stop"
-                reason = "🛑 Antecipando Pernoite (Fadiga/Noite)"
+                reason = "🛑 Pernoite"
+                if d_fuel > (range_fuel * 0.7):
+                    cat = "combo"
+                    reason = "🛌 Pernoite + Abastecer"
+                    d_fuel = 0
+                
+                # Reset de cansaço
                 stop_duration_h = dur_sleep
                 d_sleep = 0
+                d_rest = 0
                 day_count += 1
-            elif km_rem_fuel < lookahead_km:
-                cat = "fuel"
-                reason = "☕ Pausa + Abastecer"
-                stop_duration_h = dur_fuel / 60
+
+            elif d_fuel >= range_fuel:
+                # Se for abastecer e estiver perto da noite, faz combo pernoite
+                if near_night:
+                    cat = "combo"
+                    reason = "⛽ Abastecer + Pernoite"
+                    stop_duration_h = dur_sleep
+                    d_sleep = 0
+                    day_count += 1
+                else:
+                    cat = "fuel"
+                    reason = "Fuel Stop"
+                    stop_duration_h = dur_fuel / 60
                 d_fuel = 0
-            else:
-                cat = "coffee"
-                reason = "Pausa Descanso"
-                stop_duration_h = dur_rest / 60
-            d_rest = 0
+                d_rest = 0
+
+            elif d_rest >= rest_interval_km:
+                # Se for descansar e estiver perto de algo maior (noite ou combustível), decide se antecipa
+                km_rem_fuel = range_fuel - d_fuel
+                if near_night:
+                    # Antecipa pernoite em vez de só café
+                    cat = "night_stop"
+                    reason = "🛑 Antecipando Pernoite (Fadiga/Noite)"
+                    stop_duration_h = dur_sleep
+                    d_sleep = 0
+                    day_count += 1
+                elif km_rem_fuel < lookahead_km:
+                    cat = "fuel"
+                    reason = "☕ Pausa + Abastecer"
+                    stop_duration_h = dur_fuel / 60
+                    d_fuel = 0
+                else:
+                    cat = "coffee"
+                    reason = "Pausa Descanso"
+                    stop_duration_h = dur_rest / 60
+                d_rest = 0
 
         if cat:
             # Ajuste noturno (não sai antes das 06h se avoid_night estiver ativo)

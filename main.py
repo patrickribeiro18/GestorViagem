@@ -125,8 +125,10 @@ if "code" in query_params:
         st.rerun()
 
 # --- ESTADO INICIAL GERAL ---
-if "trip_result" not in st.session_state:
-    st.session_state["trip_result"] = None
+if "user" not in st.session_state: st.session_state["user"] = None
+if "trip_result" not in st.session_state: st.session_state["trip_result"] = None
+if "fixed_stops" not in st.session_state: st.session_state["fixed_stops"] = [] # Lista de {idx_original, coords, name, type}
+if "stop_editing_idx" not in st.session_state: st.session_state["stop_editing_idx"] = None
 
 
 # --- SIDEBAR ---
@@ -354,6 +356,10 @@ with tab_planner:
 
     # ----- PROCESSAMENTO DA ROTA -----
     if submitted and st.session_state["origin_data"] and st.session_state["dest_data"]:
+        # Reseta estados de edição manual ao iniciar uma nova busca completa
+        st.session_state["fixed_stops"] = []
+        st.session_state["stop_editing_idx"] = None
+        
         user_datetime = datetime.combine(input_date, input_time)
         client = openrouteservice.Client(key=utils.ORS_KEY)
         try:
@@ -397,7 +403,9 @@ with tab_planner:
                     tank=tank, kml=kml, dur_fuel=dur_fuel, dur_rest=dur_rest, dur_sleep=dur_sleep,
                     max_drive_hours=max_drive_hours, rest_interval_km=rest_interval_km,
                     avoid_night=avoid_night, extend_sunset=extend_sunset,
-                    ors_client=client, progress_callback=_progress
+                    ors_client=client, 
+                    fixed_stops=st.session_state["fixed_stops"].copy(),
+                    progress_callback=_progress
                 )
                 prog.empty()
 
@@ -467,8 +475,74 @@ with tab_planner:
             folium.Marker(mk["loc"], popup=folium.Popup(mk["popup"], max_width=280), icon=folium.Icon(color=mk["color"], icon="info-sign")).add_to(m_res)
 
         st_folium(m_res, use_container_width=True, height=520, returned_objects=[])
+        
         st.subheader("📋 Roteiro Detalhado")
-        st.dataframe(pd.DataFrame(res["timeline"]), use_container_width=True, hide_index=True)
+        st.info("💡 Você pode trocar qualquer local de parada clicando no botão abaixo da etapa.")
+        
+        timeline_df = pd.DataFrame(res["timeline"])
+        
+        for i, row in timeline_df.iterrows():
+            with st.expander(f"Etapa {row['Etapa']}: {row['Saindo de…']} ➡️ {row['Indo para…']}", expanded=(i==0)):
+                col1, col2 = st.columns([3, 1])
+                with col1:
+                    st.write(f"**Atividade:** {row['Atividade']}")
+                    st.write(f"**Chegada:** {row['Dia/Hora Chegada']} | **Distância:** {row['Distância']}")
+                    st.write(f"**Endereço:** {row['Endereço']}")
+                
+                with col2:
+                    # Não permitimos trocar Início ou Fim
+                    if i < len(timeline_df) - 1:
+                        if st.button(f"🔍 Trocar Local", key=f"swap_{i}"):
+                            st.session_state["stop_editing_idx"] = i
+                            st.rerun()
+
+        # --- SEÇÃO DE TROCA DE LOCAL VIA MAPA ---
+        if st.session_state["stop_editing_idx"] is not None:
+            idx = st.session_state["stop_editing_idx"]
+            current_stop = res["timeline"][idx]
+            st.markdown("---")
+            st.warning(f"🎯 **Selecionando novo local para a Etapa {idx+1}**")
+            st.write(f"Clique no mapa abaixo para escolher o novo local para: *{current_stop['Indo para…']}*")
+            
+            # Coordenadas da parada atual para centrar o mapa
+            # Precisamos extrair as coordenadas do raw_timeline original ou do trip_result
+            # Mas como o trip_result guarda o roteiro processado, vamos pegar do markers que tem a mesma ordem
+            stop_coords = res["markers"][idx]["loc"] # [lat, lon]
+            
+            m_swap = folium.Map(location=stop_coords, zoom_start=13)
+            folium.Marker(stop_coords, tooltip="Local Atual", icon=folium.Icon(color="gray")).add_to(m_swap)
+            
+            fg = folium.FeatureGroup(name="Novo Ponto")
+            m_swap.add_child(fg)
+            
+            map_data = st_folium(m_swap, key="map_swap", height=400, use_container_width=True)
+            
+            if map_data and map_data.get("last_clicked"):
+                new_coords = [map_data["last_clicked"]["lng"], map_data["last_clicked"]["lat"]]
+                if st.button("✅ Confirmar Novo Local"):
+                    # Busca o nome do local selecionado
+                    _, _, _, _, s_name, _ = utils.find_best_place_google(new_coords[1], new_coords[0], "coffee", client)
+                    
+                    # Adiciona aos fixed_stops
+                    # Removemos se já existir um fixed_stop para esse índice aproximado (simplificação)
+                    st.session_state["fixed_stops"] = [fs for fs in st.session_state["fixed_stops"] if fs["idx_original"] != idx]
+                    st.session_state["fixed_stops"].append({
+                        "idx_original": idx,
+                        "coords": new_coords,
+                        "name": s_name,
+                        "type": "coffee" # Por padrão
+                    })
+                    
+                    st.session_state["stop_editing_idx"] = None
+                    st.success(f"Local atualizado para: {s_name}. Recalculando...")
+                    time.sleep(1)
+                    st.rerun()
+            
+            if st.button("❌ Cancelar"):
+                st.session_state["stop_editing_idx"] = None
+                st.rerun()
+
+        st.markdown("---")
 
         if st.button("💾 Salvar na Comunidade"):
             ok, msg = utils.save_trip(st.session_state["user"].id, res["origin"], res["dest"], res["total_km"], price, res["cost"], res["timeline"])
