@@ -67,7 +67,17 @@ def logout_user():
 def get_google_auth_data():
     """Gera a URL de auth e o code_verifier (PKCE)."""
     try:
+        # Detecta automaticamente se está local ou produção
+        # Se você estiver rodando local, ele usa localhost. No Streamlit Cloud, usa a URL oficial.
         redirect_url = "https://gestorviagem.streamlit.app"
+        try:
+            # Tenta detectar o host atual para facilitar o dev local
+            host = st.context.headers.get("Host", "")
+            if "localhost" in host or "127.0.0.1" in host:
+                redirect_url = "http://localhost:8501"
+        except:
+            pass
+            
         data = supabase.auth.sign_in_with_oauth({
             "provider": "google",
             "options": {
